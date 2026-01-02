@@ -16,8 +16,8 @@ public class OpenApiConfig {
                         .title("Authorization Service API")
                         .version("0.0.1")
                         .description(
-                                "APIs do authorization-service responsáveis pela autorização de transações financeiras " +
-                                        "de crédito e débito, orquestrando a comunicação com o account-service."
+                                "APIs of the authorization-service responsible for authorizing credit and debit financial " +
+                                        "transactions, orchestrating communication with the account-service."
                         )
                         .contact(new Contact()
                                 .name("Matheus Cavalari")
