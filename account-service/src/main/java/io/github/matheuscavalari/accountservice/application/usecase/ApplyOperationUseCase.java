@@ -36,16 +36,19 @@ public class ApplyOperationUseCase {
             return toResult(existing.get());
         }
 
-        // 2) Lock pessimista na conta (SELECT ... FOR UPDATE)
+        // 2) Validações que NÃO dependem do banco (antes do lock)
+        validateCommand(cmd);
+
+        // 3) Lock pessimista na conta (SELECT ... FOR UPDATE)
         AccountEntity account = accountRepository.findByIdForUpdate(cmd.accountId())
                 .orElseThrow(() -> new AccountNotFoundException(cmd.accountId()));
 
-        // 3) Validações mínimas
-        validate(cmd, account);
+        // 4) Validações que dependem da conta (depois do lock)
+        validateAgainstAccount(cmd, account);
 
-        // 4) Regra de negócio: calcula saldo resultante e status
+        // 5) Regra de negócio: calcula saldo resultante e status
         BigDecimal current = account.getBalanceAmount();
-        BigDecimal resulting = current;
+        BigDecimal resulting;
         OperationStatus status;
 
         if (cmd.type() == OperationType.CREDIT) {
@@ -63,9 +66,8 @@ public class ApplyOperationUseCase {
             }
         }
 
-        // 5) Persistência da operação (idempotência é garantida pelo PK transaction_id)
+        // 6) Persistência da operação (idempotência é garantida pelo PK transaction_id)
         OffsetDateTime now = OffsetDateTime.now();
-
         OperationEntity op = new OperationEntity(
                 cmd.transactionId(),
                 cmd.accountId(),
@@ -80,7 +82,7 @@ public class ApplyOperationUseCase {
         );
 
         try {
-            // salva a operação primeiro para garantir idempotência antes de mexer no saldo
+            // salva a operação primeiro para garantir idempotência antes de atualizar saldo
             operationRepository.saveAndFlush(op);
         } catch (DataIntegrityViolationException dup) {
             // outra thread/processo inseriu a mesma operação ao mesmo tempo -> retorna a já existente
@@ -89,7 +91,7 @@ public class ApplyOperationUseCase {
                     .orElseThrow(() -> dup);
         }
 
-        // 6) Se SUCCEEDED, atualiza saldo (lock já está segurando a linha)
+        // 7) Se SUCCEEDED, atualiza saldo (lock já está segurando a linha)
         if (status == OperationStatus.SUCCEEDED) {
             account.setBalanceAmount(resulting);
             // updatedAt será preenchido automaticamente via @PreUpdate
@@ -109,22 +111,27 @@ public class ApplyOperationUseCase {
         );
     }
 
-    private void validate(ApplyOperationCommand cmd, AccountEntity account) {
+    private void validateCommand(ApplyOperationCommand cmd) {
+        if (cmd.type() == null) {
+            throw new IllegalArgumentException("type is required");
+        }
         if (cmd.amountValue() == null || cmd.amountValue().compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("amountValue must be > 0");
         }
         if (cmd.amountCurrency() == null || cmd.amountCurrency().isBlank()) {
             throw new IllegalArgumentException("amountCurrency is required");
         }
-        // garante consistência de moeda
-        if (!cmd.amountCurrency().equalsIgnoreCase(account.getBalanceCurrency())) {
-            throw new IllegalArgumentException("currency mismatch");
-        }
         if (cmd.timestamp() == null) {
             throw new IllegalArgumentException("timestamp is required");
         }
-        if (cmd.type() == null) {
-            throw new IllegalArgumentException("type is required");
+    }
+
+    private void validateAgainstAccount(ApplyOperationCommand cmd, AccountEntity account) {
+        if (!cmd.amountCurrency().equalsIgnoreCase(account.getBalanceCurrency())) {
+            throw new IllegalArgumentException(
+                    "Currency mismatch: operation currency '%s' does not match account currency '%s'"
+                            .formatted(cmd.amountCurrency(), account.getBalanceCurrency())
+            );
         }
     }
 

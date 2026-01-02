@@ -32,6 +32,15 @@ class ApplyOperationUseCaseTest {
         useCase = new ApplyOperationUseCase(accountRepository, operationRepository);
     }
 
+    private static AccountEntity account(UUID id, String currency, String balance) {
+        return new AccountEntity(
+                id, "owner-1", "ENABLED",
+                new BigDecimal(balance), currency,
+                OffsetDateTime.now().minusDays(1),
+                OffsetDateTime.now().minusDays(1)
+        );
+    }
+
     @Test
     void shouldReturnExistingOperation_whenTransactionIdAlreadyProcessed() {
         UUID accountId = UUID.randomUUID();
@@ -68,16 +77,146 @@ class ApplyOperationUseCaseTest {
     }
 
     @Test
+    void shouldThrowAccountNotFoundException_withExpectedMessage() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.empty());
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, OperationType.DEBIT,
+                new BigDecimal("10.00"), "BRL",
+                OffsetDateTime.now()
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(ApplyOperationUseCase.AccountNotFoundException.class)
+                .hasMessage("Account not found: " + accountId);
+
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
+    void shouldThrowWhenAmountIsZeroOrNegative_beforeLock() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, OperationType.CREDIT,
+                BigDecimal.ZERO, "BRL",
+                OffsetDateTime.now()
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("amountValue must be > 0");
+
+        // não deve tentar lockar conta
+        verify(accountRepository, never()).findByIdForUpdate(any());
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
+    void shouldThrowWhenCurrencyIsBlank_beforeLock() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, OperationType.CREDIT,
+                new BigDecimal("10.00"), "  ",
+                OffsetDateTime.now()
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("amountCurrency is required");
+
+        verify(accountRepository, never()).findByIdForUpdate(any());
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
+    void shouldThrowWhenTimestampIsNull_beforeLock() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, OperationType.CREDIT,
+                new BigDecimal("10.00"), "BRL",
+                null
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("timestamp is required");
+
+        verify(accountRepository, never()).findByIdForUpdate(any());
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
+    void shouldThrowWhenTypeIsNull_beforeLock() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, null,
+                new BigDecimal("10.00"), "BRL",
+                OffsetDateTime.now()
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("type is required");
+
+        verify(accountRepository, never()).findByIdForUpdate(any());
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
+    void shouldThrowWhenCurrencyMismatch_afterLock_withDetailedMessage() {
+        UUID accountId = UUID.randomUUID();
+        UUID txId = UUID.randomUUID();
+
+        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account(accountId, "BRL", "100.00")));
+
+        ApplyOperationCommand cmd = new ApplyOperationCommand(
+                accountId, txId, OperationType.DEBIT,
+                new BigDecimal("10.00"), "USD",
+                OffsetDateTime.now()
+        );
+
+        assertThatThrownBy(() -> useCase.execute(cmd))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Currency mismatch")
+                .hasMessageContaining("USD")
+                .hasMessageContaining("BRL");
+
+        verify(operationRepository, never()).saveAndFlush(any());
+        verify(accountRepository, never()).save(any());
+    }
+
+    @Test
     void shouldCreditAndUpdateBalance_whenCreditOperation() {
         UUID accountId = UUID.randomUUID();
         UUID txId = UUID.randomUUID();
 
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
+        AccountEntity account = account(accountId, "BRL", "100.00");
 
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
         when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
@@ -106,12 +245,7 @@ class ApplyOperationUseCaseTest {
         UUID accountId = UUID.randomUUID();
         UUID txId = UUID.randomUUID();
 
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
+        AccountEntity account = account(accountId, "BRL", "100.00");
 
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
         when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
@@ -139,12 +273,7 @@ class ApplyOperationUseCaseTest {
         UUID accountId = UUID.randomUUID();
         UUID txId = UUID.randomUUID();
 
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("50.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
+        AccountEntity account = account(accountId, "BRL", "50.00");
 
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
         when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
@@ -167,46 +296,13 @@ class ApplyOperationUseCaseTest {
     }
 
     @Test
-    void shouldThrowWhenCurrencyMismatch() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, OperationType.DEBIT,
-                new BigDecimal("10.00"), "USD",
-                OffsetDateTime.now()
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("currency mismatch");
-
-        verify(operationRepository, never()).saveAndFlush(any());
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
     void shouldHandleDuplicateInsertRace_byReturningExistingOperation() {
         UUID accountId = UUID.randomUUID();
         UUID txId = UUID.randomUUID();
 
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
+        AccountEntity account = account(accountId, "BRL", "100.00");
 
+        // primeira checagem: não existe
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
         when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
 
@@ -221,6 +317,7 @@ class ApplyOperationUseCaseTest {
                 OffsetDateTime.now()
         );
 
+        // segunda checagem: agora existe
         when(operationRepository.findById(txId)).thenReturn(Optional.of(persistedByOtherThread));
 
         ApplyOperationCommand cmd = new ApplyOperationCommand(
@@ -234,6 +331,7 @@ class ApplyOperationUseCaseTest {
         assertThat(result.status()).isEqualTo(OperationStatus.SUCCEEDED);
         assertThat(result.resultingBalanceAmount()).isEqualByComparingTo("110.00");
 
+        // nesse cenário, este fluxo retorna o existente e não salva conta
         verify(accountRepository, never()).save(any());
     }
 
@@ -242,12 +340,7 @@ class ApplyOperationUseCaseTest {
         UUID accountId = UUID.randomUUID();
         UUID txId = UUID.randomUUID();
 
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
+        AccountEntity account = account(accountId, "BRL", "100.00");
 
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
         when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
@@ -255,6 +348,7 @@ class ApplyOperationUseCaseTest {
         DataIntegrityViolationException dup = new DataIntegrityViolationException("dup key");
         when(operationRepository.saveAndFlush(any())).thenThrow(dup);
 
+        // segunda checagem continua vazia -> relança dup
         when(operationRepository.findById(txId)).thenReturn(Optional.empty());
 
         ApplyOperationCommand cmd = new ApplyOperationCommand(
@@ -267,144 +361,6 @@ class ApplyOperationUseCaseTest {
                 .isSameAs(dup);
 
         verify(operationRepository).saveAndFlush(any(OperationEntity.class));
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
-    void shouldThrowWhenAmountIsZeroOrNegative() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, OperationType.CREDIT,
-                BigDecimal.ZERO, "BRL",
-                OffsetDateTime.now()
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("amountValue must be > 0");
-
-        verify(operationRepository, never()).saveAndFlush(any());
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
-    void shouldThrowWhenCurrencyIsBlank() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, OperationType.CREDIT,
-                new BigDecimal("10.00"), "  ",
-                OffsetDateTime.now()
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("amountCurrency is required");
-
-        verify(operationRepository, never()).saveAndFlush(any());
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
-    void shouldThrowWhenTimestampIsNull() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, OperationType.CREDIT,
-                new BigDecimal("10.00"), "BRL",
-                null
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("timestamp is required");
-
-        verify(operationRepository, never()).saveAndFlush(any());
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
-    void shouldThrowWhenTypeIsNull() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        AccountEntity account = new AccountEntity(
-                accountId, "owner-1", "ENABLED",
-                new BigDecimal("100.00"), "BRL",
-                OffsetDateTime.now().minusDays(1),
-                OffsetDateTime.now().minusDays(1)
-        );
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.of(account));
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, null,
-                new BigDecimal("10.00"), "BRL",
-                OffsetDateTime.now()
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("type is required");
-
-        verify(operationRepository, never()).saveAndFlush(any());
-        verify(accountRepository, never()).save(any());
-    }
-
-    @Test
-    void shouldThrowAccountNotFoundException_withExpectedMessage() {
-        UUID accountId = UUID.randomUUID();
-        UUID txId = UUID.randomUUID();
-
-        when(operationRepository.findById(txId)).thenReturn(Optional.empty());
-        when(accountRepository.findByIdForUpdate(accountId)).thenReturn(Optional.empty());
-
-        ApplyOperationCommand cmd = new ApplyOperationCommand(
-                accountId, txId, OperationType.DEBIT,
-                new BigDecimal("10.00"), "BRL",
-                OffsetDateTime.now()
-        );
-
-        assertThatThrownBy(() -> useCase.execute(cmd))
-                .isInstanceOf(ApplyOperationUseCase.AccountNotFoundException.class)
-                .hasMessage("Account not found: " + accountId);
-
-        verify(operationRepository, never()).saveAndFlush(any());
         verify(accountRepository, never()).save(any());
     }
 }
