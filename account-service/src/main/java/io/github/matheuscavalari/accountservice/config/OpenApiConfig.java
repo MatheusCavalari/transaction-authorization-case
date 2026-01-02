@@ -15,7 +15,7 @@ public class OpenApiConfig {
                 .info(new Info()
                         .title("Account Service API")
                         .version("0.0.1")
-                        .description("APIs do account-service: operações de contas e saldos")
+                        .description("APIs of the account-service: account and balance operations")
                         .contact(new Contact().name("Matheus Cavalari").email("matheuscavbarbosa@hotmail.com"))
                 );
     }

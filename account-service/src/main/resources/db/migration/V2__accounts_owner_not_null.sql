@@ -1,0 +1,2 @@
+ALTER TABLE accounts
+    ALTER COLUMN owner SET NOT NULL;
