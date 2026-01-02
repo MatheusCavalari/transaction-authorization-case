@@ -3,6 +3,8 @@ package io.github.matheuscavalari.accountservice.adapters.outbound.persistence.j
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 
 import java.math.BigDecimal;
@@ -17,7 +19,7 @@ public class AccountEntity {
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
-    @Column(name = "owner")
+    @Column(name = "owner", nullable = false)
     private String owner;
 
     @Column(name = "status", nullable = false)
@@ -36,6 +38,7 @@ public class AccountEntity {
     private OffsetDateTime updatedAt;
 
     protected AccountEntity() {
+        // JPA
     }
 
     public AccountEntity(UUID id,
@@ -52,6 +55,18 @@ public class AccountEntity {
         this.balanceCurrency = balanceCurrency;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+    }
+
+    @PrePersist
+    void prePersist() {
+        var now = OffsetDateTime.now();
+        if (this.createdAt == null) this.createdAt = now;
+        if (this.updatedAt == null) this.updatedAt = now;
+    }
+
+    @PreUpdate
+    void preUpdate() {
+        this.updatedAt = OffsetDateTime.now();
     }
 
     public UUID getId() {
@@ -96,9 +111,5 @@ public class AccountEntity {
 
     public void setBalanceCurrency(String balanceCurrency) {
         this.balanceCurrency = balanceCurrency;
-    }
-
-    public void setUpdatedAt(OffsetDateTime updatedAt) {
-        this.updatedAt = updatedAt;
     }
 }
