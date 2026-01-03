@@ -1,5 +1,5 @@
 services:
-  postgres:
+  account-postgres:
     image: postgres:16
     container_name: account-postgres
     environment:
@@ -8,8 +8,60 @@ services:
       POSTGRES_PASSWORD: account
     ports:
       - "5432:5432"
-    volumes:
-      - account_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U account -d accountdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-volumes:
-  account_pgdata:
+  localstack:
+    image: localstack/localstack:3.7.2
+    container_name: localstack
+    environment:
+      - SERVICES=sqs
+      - DEFAULT_REGION=sa-east-1
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep -q '\"sqs\":'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  account-service:
+    build:
+      context: ./account-service
+    container_name: account-service
+    depends_on:
+      account-postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    environment:
+      # DB
+      SPRING_DATASOURCE_URL: jdbc:postgresql://account-postgres:5432/accountdb
+      SPRING_DATASOURCE_USERNAME: account
+      SPRING_DATASOURCE_PASSWORD: account
+
+      # LocalStack SQS
+      AWS_REGION: sa-east-1
+      SPRING_CLOUD_AWS_CREDENTIALS_ACCESS_KEY: test
+      SPRING_CLOUD_AWS_CREDENTIALS_SECRET_KEY: test
+      SPRING_CLOUD_AWS_SQS_ENDPOINT: http://localstack:4566
+
+      # Moeda padrão
+      ACCOUNT_DEFAULT_CURRENCY: BRL
+
+    ports:
+      - "8081:8081"
+
+  authorization-service:
+    build:
+      context: ./authorization-service
+    container_name: authorization-service
+    depends_on:
+      - account-service
+    environment:
+      ACCOUNT_SERVICE_BASE_URL: http://account-service:8081
+    ports:
+      - "8080:8080"
