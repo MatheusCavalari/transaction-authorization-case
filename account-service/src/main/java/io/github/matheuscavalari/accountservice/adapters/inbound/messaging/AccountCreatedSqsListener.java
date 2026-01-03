@@ -16,8 +16,8 @@ public class AccountCreatedSqsListener {
 
     @SqsListener("conta-bancaria-criada")
     public void onMessage(AccountCreatedMessage message) {
-        var a = message.account();
-        service.createIfNotExists(a.id(), a.owner(), a.createdAtEpoch(), a.status());
+        var account = message.account();
+        service.createIfNotExists(account.id(), account.owner(), account.createdAtEpoch(), account.status());
     }
 }
 

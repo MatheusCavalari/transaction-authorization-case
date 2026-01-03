@@ -32,7 +32,7 @@ public class CreateAccountFromEventService {
                                   String status) {
 
         OffsetDateTime createdAt = parseEpochSeconds(createdAtEpoch);
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         AccountEntity entity = new AccountEntity(
                 accountId,
