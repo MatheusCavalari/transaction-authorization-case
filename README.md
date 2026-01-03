@@ -67,42 +67,54 @@ transaction-authorization-case/
 - Docker + Docker Compose
 - AWS CLI
 
-### Subir todo o ambiente
+### Subir infraestrutura base
 
 ```bash
-docker compose up --build
+docker compose up -d localstack account-postgres
 ```
-
-Serviços disponíveis:
-- authorization-service: http://localhost:8080
-- account-service: http://localhost:8081
 
 ---
 
-## 📬 Criação de Conta via Evento (SQS)
+## ⚡ Teste com Carga (Criação Massiva de Contas)
 
-As contas são criadas a partir de eventos publicados na fila SQS `conta-bancaria-criada`.  
-O saldo inicial da conta é sempre **ZERO**.
+O projeto inclui um **gerador de mensagens** para simular carga realista, criando milhares de contas via SQS.
 
-### Payload do evento
+Esse processo é **opcional** e controlado por *profile* no Docker Compose.
 
-```json
-{
-  "account": {
-    "id": "UUID",
-    "owner": "string",
-    "created_at": "epoch_seconds",
-    "status": "ENABLED"
-  }
-}
+### 1️⃣ Rodar o gerador de contas
+
+```bash
+docker compose --profile load up message-generator
 ```
 
-### Enviar mensagem (Windows CMD)
+### 2️⃣ Verificar se a fila foi preenchida
 
-```bat
-aws --region sa-east-1 --endpoint-url=http://localhost:4566 sqs send-message ^
+```bash
+aws --region sa-east-1 --endpoint-url=http://localhost:4566 sqs get-queue-attributes ^
   --queue-url http://localhost:4566/000000000000/conta-bancaria-criada ^
-  --message-body "{\"account\":{\"id\":\"UUID\",\"owner\":\"owner\",\"created_at\":\"1634874339\",\"status\":\"ENABLED\"}}"
+  --attribute-names ApproximateNumberOfMessages
+```
+
+### 3️⃣ Subir o consumer (account-service)
+
+```bash
+docker compose up -d account-service
+```
+
+### 4️⃣ Validar criação das contas no banco
+
+```bash
+docker exec -it account-postgres psql -U account -d accountdb
+```
+
+```sql
+select count(*) from accounts;
+```
+
+### 5️⃣ Subir o authorization-service
+
+```bash
+docker compose up -d authorization-service
 ```
 
 ---
@@ -123,18 +135,137 @@ POST /transactions/{transactionId}
     - Subtrai o saldo da conta
     - Caso a operação resulte em saldo negativo, a transação é marcada como `FAILED` e o saldo não é alterado
 
-### Exemplo de CREDIT
+### 🧪 Teste Manual do Fluxo Completo
+Os comandos abaixo validam o comportamento esperado do sistema, incluindo
+**crédito**, **débito** e **idempotência**.
+
+💡 **Observação**  
+Os exemplos de `curl` utilizam o formato do **Windows (CMD / PowerShell)**.  
+Em **Linux/macOS**, ajuste o escape de aspas ou utilize aspas simples (`'`).
+
+Antes de executar, obtenha um accountId válido no banco:
+```sql
+docker exec -it account-postgres psql -U account -d accountdb
+```
+```sql
+select id from accounts limit 1;
+```
+
+### 1️⃣ Testar CREDIT
 
 ```bash
-curl -X POST "http://localhost:8080/transactions/{transactionId}" ^
+curl -X POST "http://localhost:8080/transactions/11111111-1111-1111-1111-111111111111" ^
   -H "Content-Type: application/json" ^
   -d "{
-    \"accountId\": \"UUID\",
+    \"accountId\": \"<UUID_DO_BANCO>\",
     \"type\": \"CREDIT\",
     \"amount\": { \"value\": 50.00, \"currency\": \"BRL\" },
     \"timestamp\": \"2025-12-30T15:05:00Z\"
   }"
+
 ```
+
+### ✅ Esperado (exemplo de resposta)
+```json
+{
+    "transaction": {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "type": "CREDIT",
+        "amount": {
+            "value": 50.00,
+            "currency": "BRL"
+        },
+        "status": "SUCCEEDED",
+        "timestamp": "2025-12-30T15:05:00Z"
+    },
+    "account": {
+        "id": "<UUID_DO_BANCO>",
+        "balance": {
+            "amount": 50.00,
+            "currency": "BRL"
+        }
+    }
+}
+```
+💡 Observação: os valores de UUID são ilustrativos.
+
+### 2️⃣ Testar DEBIT
+
+```bash
+curl -X POST "http://localhost:8080/transactions/22222222-2222-2222-2222-222222222222" ^
+  -H "Content-Type: application/json" ^
+  -d "{
+    \"accountId\": \"<UUID_DO_BANCO>\",
+    \"type\": \"DEBIT\",
+    \"amount\": { \"value\": 10.00, \"currency\": \"BRL\" },
+    \"timestamp\": \"2025-12-30T15:06:00Z\"
+  }"
+```
+
+### ✅ Esperado (exemplo de resposta)
+```json
+{
+    "transaction": {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "type": "DEBIT",
+        "amount": {
+            "value": 10.00,
+            "currency": "BRL"
+        },
+        "status": "SUCCEEDED",
+        "timestamp": "2025-12-30T15:06:00Z"
+    },
+    "account": {
+        "id": "<UUID_DO_BANCO>",
+        "balance": {
+            "amount": 40.00,
+            "currency": "BRL"
+        }
+    }
+}
+```
+
+### 3️⃣ Provar IDEMPOTÊNCIA (ponto-chave)
+Repetir exatamente a mesma requisição, usando o mesmo transactionId:
+
+```bash
+curl -X POST "http://localhost:8080/transactions/22222222-2222-2222-2222-222222222222" ^
+  -H "Content-Type: application/json" ^
+  -d "{
+    \"accountId\": \"<UUID_DO_BANCO>\",
+    \"type\": \"DEBIT\",
+    \"amount\": { \"value\": 10.00, \"currency\": \"BRL\" },
+    \"timestamp\": \"2025-12-30T15:06:00Z\"
+  }"
+```
+
+### ✅ Esperado (exemplo de resposta)
+```json
+{
+    "transaction": {
+        "id": "22222222-2222-2222-2222-222222222222",
+        "type": "DEBIT",
+        "amount": {
+            "value": 10.00,
+            "currency": "BRL"
+        },
+        "status": "SUCCEEDED",
+        "timestamp": "2025-12-30T15:06:00Z"
+    },
+    "account": {
+        "id": "<UUID_DO_BANCO>",
+        "balance": {
+            "amount": 40.00,
+            "currency": "BRL"
+        }
+    }
+}
+```
+- resposta idêntica à chamada anterior
+- saldo não é alterado
+- nenhuma nova operação criada no banco
+
+Esse comportamento garante idempotência, essencial em sistemas financeiros distribuídos.
 
 ---
 
@@ -147,6 +278,7 @@ curl -X POST "http://localhost:8080/transactions/{transactionId}" ^
   - Operações de saldo utilizam lock pessimista no banco de dados
   - Evita race conditions em cenários de múltiplas transações simultâneas
 Esses mecanismos são fundamentais para garantir consistência em sistemas financeiros.
+
 ---
 
 ## 🧠 Decisões de Arquitetura
